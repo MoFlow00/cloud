@@ -32,5 +32,7 @@ jobs:
         env:
           TURSO_URL: ${{ secrets.TURSO_URL }}
           TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          PYTHONUNBUFFERED: "1"
         run: |
-          python cloud_crawler.py
+          python -u cloud_crawler.py
+
