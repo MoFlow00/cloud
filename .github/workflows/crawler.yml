@@ -1,0 +1,36 @@
+name: Cloud Telegram Crawler
+
+on:
+  schedule:
+    # يعمل تلقائياً كل ساعتين (تقدر تعدل التوقيت)
+    - cron: '0 */2 * * *'
+  # إمكانية تشغيله يدوياً في أي وقت بضغطة زر
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    # أقصى مدة للرانر الواحد (GitHub بيسمح حتى 360 دقيقة = 6 ساعات للران)
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Cloud Crawler
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+        run: |
+          python cloud_crawler.py
