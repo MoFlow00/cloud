@@ -2,15 +2,15 @@ name: Cloud Telegram Crawler
 
 on:
   schedule:
-    # يعمل تلقائياً كل ساعتين (تقدر تعدل التوقيت)
-    - cron: '0 */2 * * *'
-  # إمكانية تشغيله يدوياً في أي وقت بضغطة زر
+    - cron: "0 */2 * * *"
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    # أقصى مدة للرانر الواحد (GitHub بيسمح حتى 360 دقيقة = 6 ساعات للران)
     timeout-minutes: 350
 
     steps:
@@ -20,8 +20,8 @@ jobs:
       - name: Set up Python
         uses: setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install Dependencies
         run: |
