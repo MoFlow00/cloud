@@ -14,18 +14,25 @@ if not TURSO_URL or not TURSO_TOKEN:
     print("[ERROR] TURSO_URL or TURSO_TOKEN environment variables are missing!", flush=True)
     sys.exit(1)
 
-# تحويل بروتوكول libsql تلقائياً إلى https لضمان عمل aiohttp
 if TURSO_URL.startswith("libsql://"):
     TURSO_URL = "https://" + TURSO_URL[len("libsql://"):]
 
 PIPELINE_URL = f"{TURSO_URL}/v2/pipeline"
 
-# 2. إعدادات الأداء الفائق وتفادي أخطاء الشبكة
-CONCURRENCY = 120            # 120 قناة متزامنة في نفس اللحظة
-BATCH_SIZE = 100             # 100 قناة في كل دفعة لضمان استقرار الاتصال وحجم البايلود
-TIMEOUT_SECONDS = 6          # 6 ثوانٍ كحد أقصى لتخطي القنوات البطيئة
-MAX_RUN_TIME = 5.3 * 3600    # التوقف الآمن بعد 5.3 ساعات قبل إغلاق الرانر (6 ساعات)
-RECHECK_INTERVAL = 86400     # 24 ساعة كحد أدنى لإعادة فحص القناة
+# 2. إعدادات الأداء وتفادي استهلاك الكوتة
+CONCURRENCY = 120            # عدد القنوات المتزامنة
+BATCH_SIZE = 100             # حجم الدفعة
+TIMEOUT_SECONDS = 6          # تخطي القنوات المعلقة
+MAX_RUN_TIME = 5.3 * 3600    # التوقف التلقائي قبل حد رانر جيت هاب
+RECHECK_INTERVAL = 86400     # 24 ساعة كحد أدنى لإعادة الفحص
+
+# 3. إعدادات الفلترة الذكية (الحروف الروسية، الهندية، الكريبتو، والكلمات المحددة)
+FOREIGN_CHARS_REGEX = re.compile(r"[\u0400-\u04FF\u0900-\u097F]")  # Cyrillic & Devanagari
+
+BANNED_WORDS = [
+    "سكس", "غزة", "سوريا",
+    "bitcoin", "بيتكوين", "crypto", "usdt", "btc", "binance"
+]
 
 HEADERS = {
     "User-Agent": (
@@ -97,6 +104,18 @@ def parse_views(view_text: str) -> str:
     return view_text.strip()
 
 
+def contains_banned_content(text: str) -> bool:
+    """فحص سريع للحروف الروسية/الهندية والكلمات المحظورة"""
+    if not text:
+        return False
+    # 1. فحص الحروف الروسية أو الهندية
+    if FOREIGN_CHARS_REGEX.search(text):
+        return True
+    # 2. فحص الكلمات المحظورة
+    text_lower = text.lower()
+    return any(word in text_lower for word in BANNED_WORDS)
+
+
 async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphore: asyncio.Semaphore) -> dict:
     url = f"https://t.me/s/{username}"
     result = {
@@ -136,35 +155,36 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # فحص القنوات المغلقة أو المحذوفة
         action_wrap = soup.find("div", class_="tgme_page_action")
         if action_wrap and "You can view and join" not in html and not soup.find("div", class_="tgme_widget_message"):
             if "If you have Telegram, you can view and join" not in html:
                 result["status"] = "dead"
                 return result
 
-        # 1. جلب اسم القناة بدقة فائقة عبر og:title ثم العناصر البديلة
+        # 1. عنوان القناة
         og_title = soup.find("meta", property="og:title")
         if og_title and og_title.get("content"):
             result["title"] = og_title["content"].strip()
         else:
             title_el = soup.find("div", class_="tgme_channel_info_title") or soup.find("div", class_="tgme_page_title")
-            if title_el:
-                result["title"] = title_el.get_text(separator=" ", strip=True)
-            else:
-                result["title"] = username
+            result["title"] = title_el.get_text(separator=" ", strip=True) if title_el else username
 
         # 2. وصف القناة
         desc_el = soup.find("div", class_="tgme_channel_info_description")
-        if desc_el:
-            result["description"] = desc_el.get_text(separator="\n", strip=True)
+        result["description"] = desc_el.get_text(separator="\n", strip=True) if desc_el else ""
+
+        # [المرحلة 1: خروج سريع] فحص العنوان والوصف للحروف الأجنبية أو الكلمات المحظورة
+        meta_content = f"{result['title']} {result['description']}"
+        if contains_banned_content(meta_content):
+            result["status"] = "dead"
+            return result
 
         # 3. عدد المشتركين
         sub_el = soup.find("div", class_="tgme_channel_info_counter")
         if sub_el:
             result["subscribers"] = parse_subscribers(sub_el.get_text(strip=True))
 
-        # 4. استخراج المنشورات
+        # 4. المنشورات
         post_elements = soup.find_all("div", class_="tgme_widget_message_wrap")
         posts = []
 
@@ -185,6 +205,12 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             text_el = p_node.find("div", class_="tgme_widget_message_text")
             text = text_el.get_text(separator="\n", strip=True) if text_el else ""
 
+            # [المرحلة 2: خروج سريع] فحص نص البوست
+            if contains_banned_content(text):
+                result["status"] = "dead"
+                result["posts"] = []
+                return result
+
             image_url = ""
             video_url = ""
 
@@ -198,7 +224,6 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             if video_el:
                 video_url = video_el.get("src", "")
 
-            # تحديد نوع الميديا للفلترة السريعة
             media_type = "text"
             if video_url:
                 media_type = "video"
@@ -224,8 +249,14 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
 
         result["posts"] = posts
         result["posts_count"] = len(posts)
+
+        # [المرحلة 3: فحص التاريخ] إذا كان آخر بوست قبل 1 يناير 2025 تُعتبر القناة مهجورة
         if posts:
             result["last_post_date"] = posts[-1]["date"]
+            if result["last_post_date"] and result["last_post_date"] < "2025-01-01":
+                result["status"] = "dead"
+                result["posts"] = []
+                return result
 
         result["status"] = "ok"
 
@@ -254,14 +285,13 @@ async def main():
         while True:
             elapsed = time.time() - start_global_time
             if elapsed >= MAX_RUN_TIME:
-                print(f"[TIMEOUT] Approaching GitHub Runner limit ({elapsed/3600:.2f} hrs). Shutting down gracefully.", flush=True)
+                print(f"[TIMEOUT] Runner limit reached ({elapsed/3600:.2f} hrs). Shutting down.", flush=True)
                 break
 
             now_ts = int(time.time())
             cutoff_ts = now_ts - RECHECK_INTERVAL
 
-            # استعلام يعتمد 100% على الفهرس idx_channels_last_checked
-    # المرحلة الأولى: جلب القنوات التي لم تُفحص نهائياً (تستخدم الفهرس مباشرة وتقرأ 100 صف فقط)
+            # استعلام خفيف ومباشر على الـ Index: جلب القنوات الجديدة أولاً
             fetch_stmt = {
                 "sql": "SELECT username FROM channels WHERE last_checked IS NULL LIMIT ?;",
                 "args": [BATCH_SIZE]
@@ -272,7 +302,7 @@ async def main():
             if res and "results" in res and res["results"][0]["response"]["result"]["rows"]:
                 rows = res["results"][0]["response"]["result"]["rows"]
 
-            # المرحلة الثانية: إذا انتهت كل القنوات الجديدة، نبدأ فحص القنوات القديمة التي مر عليها 24 ساعة
+            # إذا انتهت القنوات الجديدة، جلب القنوات التي مر عليها أكثر من 24 ساعة
             if not rows:
                 fetch_stmt_old = {
                     "sql": "SELECT username FROM channels WHERE last_checked < ? ORDER BY last_checked ASC LIMIT ?;",
@@ -289,7 +319,6 @@ async def main():
             channel_usernames = [r[0]["value"] for r in rows]
             batch_start_time = time.time()
 
-            # فحص القنوات بالتوازي
             tasks = [scrape_channel(session, u, semaphore) for u in channel_usernames]
             results = await asyncio.gather(*tasks)
 
@@ -322,12 +351,17 @@ async def main():
 
                 elif st == "dead":
                     stats["dead"] += 1
+                    # نقل القناة للأرشيف وحذفها نهائياً لتوفير الكوتة والمساحة
                     pipeline_statements.append({
                         "sql": "INSERT OR IGNORE INTO archive_channels (username) VALUES (?);",
                         "args": [u]
                     })
                     pipeline_statements.append({
                         "sql": "DELETE FROM channels WHERE username = ?;",
+                        "args": [u]
+                    })
+                    pipeline_statements.append({
+                        "sql": "DELETE FROM posts WHERE username = ?;",
                         "args": [u]
                     })
 
@@ -338,7 +372,7 @@ async def main():
                         "args": [now_ts - 86400, u]
                     })
 
-            # حفظ الدفعة مقسمة على مجموعات صغيرة بحجم 200 لتفادي Network Exception ورفض الـ Payload
+            # حفظ الدفعة على أجزاء صغيرة بحجم 200 لتفادي رفض البايلود
             if pipeline_statements:
                 chunk_step = 200
                 for idx in range(0, len(pipeline_statements), chunk_step):
@@ -352,7 +386,7 @@ async def main():
             print(
                 f"[BATCH] Checked: {len(channel_usernames):3d} | "
                 f"Time: {batch_duration:5.2f}s ({rate:4.1f} ch/s) | "
-                f"OK: {stats['ok']:3d} | Dead: {stats['dead']:2d} | Err: {stats['err']:2d} | "
+                f"OK: {stats['ok']:3d} | Dead/Filtered: {stats['dead']:2d} | Err: {stats['err']:2d} | "
                 f"Total Processed: {total_processed}",
                 flush=True
             )
