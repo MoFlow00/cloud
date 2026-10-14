@@ -143,21 +143,28 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
                 result["status"] = "dead"
                 return result
 
-        # جلب بيانات القناة
-        title_el = soup.find("div", class_="tgme_channel_info_title")
-        if title_el:
-            title_text = title_el.find("span")
-            result["title"] = title_text.get_text(strip=True) if title_text else title_el.get_text(strip=True)
+        # 1. جلب اسم القناة بدقة فائقة عبر og:title ثم العناصر البديلة
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            result["title"] = og_title["content"].strip()
+        else:
+            title_el = soup.find("div", class_="tgme_channel_info_title") or soup.find("div", class_="tgme_page_title")
+            if title_el:
+                result["title"] = title_el.get_text(separator=" ", strip=True)
+            else:
+                result["title"] = username
 
+        # 2. وصف القناة
         desc_el = soup.find("div", class_="tgme_channel_info_description")
         if desc_el:
             result["description"] = desc_el.get_text(separator="\n", strip=True)
 
+        # 3. عدد المشتركين
         sub_el = soup.find("div", class_="tgme_channel_info_counter")
         if sub_el:
             result["subscribers"] = parse_subscribers(sub_el.get_text(strip=True))
 
-        # استخراج المنشورات
+        # 4. استخراج المنشورات
         post_elements = soup.find_all("div", class_="tgme_widget_message_wrap")
         posts = []
 
@@ -191,7 +198,7 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             if video_el:
                 video_url = video_el.get("src", "")
 
-            # تحديد نوع الميديا للعمود الجديد
+            # تحديد نوع الميديا للفلترة السريعة
             media_type = "text"
             if video_url:
                 media_type = "video"
@@ -253,7 +260,7 @@ async def main():
             now_ts = int(time.time())
             cutoff_ts = now_ts - RECHECK_INTERVAL
 
-            # استعلام يعتمد 100% على الفهرس (idx_channels_last_checked) لمنع مسح الجدول
+            # استعلام يعتمد 100% على الفهرس idx_channels_last_checked
             fetch_stmt = {
                 "sql": (
                     "SELECT username FROM channels "
@@ -291,7 +298,6 @@ async def main():
 
                 if st == "ok":
                     stats["ok"] += 1
-                    # تحديث بيانات القناة
                     pipeline_statements.append({
                         "sql": (
                             "UPDATE channels SET title = ?, description = ?, subscribers = ?, "
@@ -301,7 +307,6 @@ async def main():
                         "args": [r["title"], r["description"], r["subscribers"], r["posts_count"], r["last_post_date"], now_ts, u]
                     })
 
-                    # إدراج المنشورات مع عمود media_type الجديد
                     for p in r["posts"]:
                         pipeline_statements.append({
                             "sql": (
@@ -313,7 +318,6 @@ async def main():
 
                 elif st == "dead":
                     stats["dead"] += 1
-                    # أرشفة القناة الميتة وحذفها
                     pipeline_statements.append({
                         "sql": "INSERT OR IGNORE INTO archive_channels (username) VALUES (?);",
                         "args": [u]
@@ -325,7 +329,6 @@ async def main():
 
                 else:
                     stats["err"] += 1
-                    # تأجيل الفحص لمنع الدوران المتكرر على نفس الخطأ
                     pipeline_statements.append({
                         "sql": "UPDATE channels SET last_checked = ? WHERE username = ?;",
                         "args": [now_ts - 86400, u]
