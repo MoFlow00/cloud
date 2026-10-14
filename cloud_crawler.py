@@ -7,19 +7,23 @@ from bs4 import BeautifulSoup
 import aiohttp
 
 # 1. إعدادات الاتصال بقاعدة بيانات Turso
-TURSO_URL = os.environ.get("TURSO_URL", "").rstrip("/")
-TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
+TURSO_URL = os.environ.get("TURSO_URL", "").strip().rstrip("/")
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "").strip()
 
 if not TURSO_URL or not TURSO_TOKEN:
-    print("[ERROR] TURSO_URL or TURSO_TOKEN environment variables are missing!")
+    print("[ERROR] TURSO_URL or TURSO_TOKEN environment variables are missing!", flush=True)
     sys.exit(1)
+
+# تحويل بروتوكول libsql تلقائياً إلى https لضمان عمل aiohttp
+if TURSO_URL.startswith("libsql://"):
+    TURSO_URL = "https://" + TURSO_URL[len("libsql://"):]
 
 PIPELINE_URL = f"{TURSO_URL}/v2/pipeline"
 
-# 2. إعدادات الأداء القصوى لـ GitHub Actions
-CONCURRENCY = 120            # معالجة 120 قناة متزامنة في نفس اللحظة
+# 2. إعدادات الأداء الفائق لبيئة GitHub Actions
+CONCURRENCY = 120            # 120 قناة متزامنة في نفس اللحظة
 BATCH_SIZE = 250             # فحص 250 قناة في كل دفعة
-TIMEOUT_SECONDS = 6          # 6 ثوانٍ كحد أقصى لتخطي القنوات البطيئة فوراً
+TIMEOUT_SECONDS = 6          # 6 ثوانٍ كحد أقصى لتخطي القنوات البطيئة
 MAX_RUN_TIME = 5.3 * 3600    # التوقف الآمن بعد 5.3 ساعات قبل إغلاق الرانر (6 ساعات)
 RECHECK_INTERVAL = 86400     # 24 ساعة كحد أدنى لإعادة فحص القناة
 
@@ -61,9 +65,9 @@ async def execute_turso_pipeline(session: aiohttp.ClientSession, statements: lis
                 if resp.status == 200:
                     return await resp.json()
                 error_text = await resp.text()
-                print(f"[TURSO WARNING] Attempt {attempt} failed ({resp.status}): {error_text[:200]}")
+                print(f"[TURSO WARNING] Attempt {attempt} failed ({resp.status}): {error_text[:150]}", flush=True)
         except Exception as e:
-            print(f"[TURSO ERROR] Attempt {attempt} network exception: {e}")
+            print(f"[TURSO ERROR] Attempt {attempt} network exception: {e}", flush=True)
 
         await asyncio.sleep(attempt * 2)
 
@@ -126,21 +130,20 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             return result
 
     try:
-        # فحص وجود القناة وحالتها
         if "tgme_page_icon" not in html and "tgme_channel_info" not in html:
             result["status"] = "dead"
             return result
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # فحص القنوات المحذوفة أو الخاصة
+        # فحص القنوات المغلقة أو المحذوفة
         action_wrap = soup.find("div", class_="tgme_page_action")
         if action_wrap and "You can view and join" not in html and not soup.find("div", class_="tgme_widget_message"):
             if "If you have Telegram, you can view and join" not in html:
                 result["status"] = "dead"
                 return result
 
-        # جلب تفاصيل القناة
+        # جلب بيانات القناة
         title_el = soup.find("div", class_="tgme_channel_info_title")
         if title_el:
             title_text = title_el.find("span")
@@ -172,11 +175,9 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             except ValueError:
                 continue
 
-            # نص المنشور
             text_el = p_node.find("div", class_="tgme_widget_message_text")
             text = text_el.get_text(separator="\n", strip=True) if text_el else ""
 
-            # الصورة أو الفيديو
             image_url = ""
             video_url = ""
 
@@ -190,7 +191,13 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
             if video_el:
                 video_url = video_el.get("src", "")
 
-            # المشاهدات والتاريخ
+            # تحديد نوع الميديا للعمود الجديد
+            media_type = "text"
+            if video_url:
+                media_type = "video"
+            elif image_url:
+                media_type = "image"
+
             views_el = p_node.find("span", class_="tgme_widget_message_views")
             views = parse_views(views_el.get_text(strip=True) if views_el else "0")
 
@@ -203,6 +210,7 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
                 "text": text,
                 "image": image_url,
                 "video": video_url,
+                "media_type": media_type,
                 "views": views,
                 "date": post_date
             })
@@ -221,12 +229,11 @@ async def scrape_channel(session: aiohttp.ClientSession, username: str, semaphor
 
 
 async def main():
-    print(f"[START] High-Performance Cloud Crawler (Concurrency: {CONCURRENCY}, Batch: {BATCH_SIZE})...")
+    print(f"[START] Cloud Crawler Active | Concurrency: {CONCURRENCY} | Batch: {BATCH_SIZE}", flush=True)
 
     start_global_time = time.time()
     total_processed = 0
 
-    # إعداد الـ Connector بدون التحقق من SSL وبكاش DNS لتسريع فتح الاتصالات المتوازية
     connector = aiohttp.TCPConnector(
         limit=CONCURRENCY,
         ttl_dns_cache=300,
@@ -238,16 +245,15 @@ async def main():
 
     async with aiohttp.ClientSession(connector=connector) as session:
         while True:
-            # التحقق من سقف الوقت الآمن
             elapsed = time.time() - start_global_time
             if elapsed >= MAX_RUN_TIME:
-                print(f"[TIMEOUT] Approaching GitHub Runner limit ({elapsed/3600:.2f} hrs). Shutting down gracefully.")
+                print(f"[TIMEOUT] Approaching GitHub Runner limit ({elapsed/3600:.2f} hrs). Shutting down gracefully.", flush=True)
                 break
 
             now_ts = int(time.time())
             cutoff_ts = now_ts - RECHECK_INTERVAL
 
-            # 1. جلب دفعة جديدة من القنوات
+            # استعلام يعتمد 100% على الفهرس (idx_channels_last_checked) لمنع مسح الجدول
             fetch_stmt = {
                 "sql": (
                     "SELECT username FROM channels "
@@ -260,23 +266,22 @@ async def main():
 
             res = await execute_turso_pipeline(session, [fetch_stmt])
             if not res or "results" not in res:
-                print("[ERROR] Failed to fetch channels batch. Sleeping 10s...")
+                print("[ERROR] Failed to fetch channels batch. Sleeping 10s...", flush=True)
                 await asyncio.sleep(10)
                 continue
 
             rows = res["results"][0]["response"]["result"]["rows"]
             if not rows:
-                print("[FINISH] All channels are fully updated for today!")
+                print("[FINISH] All channels are fully updated for today!", flush=True)
                 break
 
             channel_usernames = [r[0]["value"] for r in rows]
             batch_start_time = time.time()
 
-            # 2. فحص القنوات بالتوازي الفائق
+            # فحص القنوات بالتوازي
             tasks = [scrape_channel(session, u, semaphore) for u in channel_usernames]
             results = await asyncio.gather(*tasks)
 
-            # 3. إعداد استعلامات الحفظ للأنابيب (Pipeline)
             pipeline_statements = []
             stats = {"ok": 0, "dead": 0, "err": 0}
 
@@ -296,19 +301,19 @@ async def main():
                         "args": [r["title"], r["description"], r["subscribers"], r["posts_count"], r["last_post_date"], now_ts, u]
                     })
 
-                    # حفظ البوستات
+                    # إدراج المنشورات مع عمود media_type الجديد
                     for p in r["posts"]:
                         pipeline_statements.append({
                             "sql": (
-                                "INSERT OR IGNORE INTO posts (username, post_id, text, image, video, views, date) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?);"
+                                "INSERT OR IGNORE INTO posts (username, post_id, text, image, video, media_type, views, date) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?);"
                             ),
-                            "args": [p["username"], p["post_id"], p["text"], p["image"], p["video"], p["views"], p["date"]]
+                            "args": [p["username"], p["post_id"], p["text"], p["image"], p["video"], p["media_type"], p["views"], p["date"]]
                         })
 
                 elif st == "dead":
                     stats["dead"] += 1
-                    # إضافة للأرشيف ثم الحذف من القنوات
+                    # أرشفة القناة الميتة وحذفها
                     pipeline_statements.append({
                         "sql": "INSERT OR IGNORE INTO archive_channels (username) VALUES (?);",
                         "args": [u]
@@ -320,13 +325,13 @@ async def main():
 
                 else:
                     stats["err"] += 1
-                    # تأجيل الفحص لمدة يوم حتى لا تعلق الحلقة
+                    # تأجيل الفحص لمنع الدوران المتكرر على نفس الخطأ
                     pipeline_statements.append({
                         "sql": "UPDATE channels SET last_checked = ? WHERE username = ?;",
                         "args": [now_ts - 86400, u]
                     })
 
-            # 4. إرسال كل العمليات لـ Turso دفعة واحدة
+            # حفظ الدفعة بالكامل في خط أنابيب واحد (Pipeline)
             if pipeline_statements:
                 await execute_turso_pipeline(session, pipeline_statements)
 
@@ -338,7 +343,8 @@ async def main():
                 f"[BATCH] Checked: {len(channel_usernames):3d} | "
                 f"Time: {batch_duration:5.2f}s ({rate:4.1f} ch/s) | "
                 f"OK: {stats['ok']:3d} | Dead: {stats['dead']:2d} | Err: {stats['err']:2d} | "
-                f"Total Processed: {total_processed}"
+                f"Total Processed: {total_processed}",
+                flush=True
             )
 
 
@@ -346,4 +352,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[STOPPED] Execution manually interrupted.")
+        print("\n[STOPPED] Execution manually interrupted.", flush=True)
