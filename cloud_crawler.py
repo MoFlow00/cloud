@@ -261,23 +261,27 @@ async def main():
             cutoff_ts = now_ts - RECHECK_INTERVAL
 
             # استعلام يعتمد 100% على الفهرس idx_channels_last_checked
+    # المرحلة الأولى: جلب القنوات التي لم تُفحص نهائياً (تستخدم الفهرس مباشرة وتقرأ 100 صف فقط)
             fetch_stmt = {
-                "sql": (
-                    "SELECT username FROM channels "
-                    "WHERE last_checked IS NULL OR last_checked < ? "
-                    "ORDER BY last_checked ASC NULLS FIRST "
-                    "LIMIT ?;"
-                ),
-                "args": [cutoff_ts, BATCH_SIZE]
+                "sql": "SELECT username FROM channels WHERE last_checked IS NULL LIMIT ?;",
+                "args": [BATCH_SIZE]
             }
 
             res = await execute_turso_pipeline(session, [fetch_stmt])
-            if not res or "results" not in res:
-                print("[ERROR] Failed to fetch channels batch. Sleeping 10s...", flush=True)
-                await asyncio.sleep(10)
-                continue
+            rows = []
+            if res and "results" in res and res["results"][0]["response"]["result"]["rows"]:
+                rows = res["results"][0]["response"]["result"]["rows"]
 
-            rows = res["results"][0]["response"]["result"]["rows"]
+            # المرحلة الثانية: إذا انتهت كل القنوات الجديدة، نبدأ فحص القنوات القديمة التي مر عليها 24 ساعة
+            if not rows:
+                fetch_stmt_old = {
+                    "sql": "SELECT username FROM channels WHERE last_checked < ? ORDER BY last_checked ASC LIMIT ?;",
+                    "args": [cutoff_ts, BATCH_SIZE]
+                }
+                res = await execute_turso_pipeline(session, [fetch_stmt_old])
+                if res and "results" in res and res["results"][0]["response"]["result"]["rows"]:
+                    rows = res["results"][0]["response"]["result"]["rows"]
+
             if not rows:
                 print("[FINISH] All channels are fully updated for today!", flush=True)
                 break
