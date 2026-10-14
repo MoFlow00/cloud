@@ -22,7 +22,7 @@ PIPELINE_URL = f"{TURSO_URL}/v2/pipeline"
 
 # 2. إعدادات الأداء الفائق لبيئة GitHub Actions
 CONCURRENCY = 120            # 120 قناة متزامنة في نفس اللحظة
-BATCH_SIZE = 250             # فحص 250 قناة في كل دفعة
+BATCH_SIZE = 100             # فحص 250 قناة في كل دفعة
 TIMEOUT_SECONDS = 6          # 6 ثوانٍ كحد أقصى لتخطي القنوات البطيئة
 MAX_RUN_TIME = 5.3 * 3600    # التوقف الآمن بعد 5.3 ساعات قبل إغلاق الرانر (6 ساعات)
 RECHECK_INTERVAL = 86400     # 24 ساعة كحد أدنى لإعادة فحص القناة
@@ -335,8 +335,12 @@ async def main():
                     })
 
             # حفظ الدفعة بالكامل في خط أنابيب واحد (Pipeline)
-            if pipeline_statements:
-                await execute_turso_pipeline(session, pipeline_statements)
+           # حفظ الدفعة مقسمة على دفعات صغيرة لتفادي Network Exception
+if pipeline_statements:
+                chunk_step = 200
+                for idx in range(0, len(pipeline_statements), chunk_step):
+                    sub_chunk = pipeline_statements[idx:idx + chunk_step]
+                    await execute_turso_pipeline(session, sub_chunk)
 
             batch_duration = time.time() - batch_start_time
             rate = len(channel_usernames) / batch_duration if batch_duration > 0 else 0
