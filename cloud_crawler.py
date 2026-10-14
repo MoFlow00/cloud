@@ -20,9 +20,9 @@ if TURSO_URL.startswith("libsql://"):
 
 PIPELINE_URL = f"{TURSO_URL}/v2/pipeline"
 
-# 2. إعدادات الأداء الفائق لبيئة GitHub Actions
+# 2. إعدادات الأداء الفائق وتفادي أخطاء الشبكة
 CONCURRENCY = 120            # 120 قناة متزامنة في نفس اللحظة
-BATCH_SIZE = 100             # فحص 250 قناة في كل دفعة
+BATCH_SIZE = 100             # 100 قناة في كل دفعة لضمان استقرار الاتصال وحجم البايلود
 TIMEOUT_SECONDS = 6          # 6 ثوانٍ كحد أقصى لتخطي القنوات البطيئة
 MAX_RUN_TIME = 5.3 * 3600    # التوقف الآمن بعد 5.3 ساعات قبل إغلاق الرانر (6 ساعات)
 RECHECK_INTERVAL = 86400     # 24 ساعة كحد أدنى لإعادة فحص القناة
@@ -334,9 +334,8 @@ async def main():
                         "args": [now_ts - 86400, u]
                     })
 
-            # حفظ الدفعة بالكامل في خط أنابيب واحد (Pipeline)
-           # حفظ الدفعة مقسمة على دفعات صغيرة لتفادي Network Exception
-if pipeline_statements:
+            # حفظ الدفعة مقسمة على مجموعات صغيرة بحجم 200 لتفادي Network Exception ورفض الـ Payload
+            if pipeline_statements:
                 chunk_step = 200
                 for idx in range(0, len(pipeline_statements), chunk_step):
                     sub_chunk = pipeline_statements[idx:idx + chunk_step]
